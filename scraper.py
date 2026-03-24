@@ -16,7 +16,10 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
+try:
+    from playwright_stealth import Stealth
+except ImportError:
+    from playwright_stealth.stealth import Stealth
 
 BASE_URL = (
     "https://golfvancouver.cps.golf/onlineresweb/search-teetime"
