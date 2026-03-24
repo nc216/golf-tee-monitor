@@ -16,10 +16,34 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
-try:
-    from playwright_stealth import Stealth
-except ImportError:
-    from playwright_stealth.stealth import Stealth
+STEALTH_SCRIPTS = [
+    # Hide webdriver flag
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
+    # Fix chrome runtime
+    """window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };""",
+    # Fix plugins/mimeTypes
+    """Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5].map(() => ({
+            length: 1,
+            0: {type: 'application/pdf'},
+            description: 'Portable Document Format',
+            filename: 'internal-pdf-viewer',
+            name: 'Chrome PDF Plugin',
+        })),
+    });""",
+    # Fix permissions query
+    """const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters);""",
+    # Fix languages
+    "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});",
+    # Fix platform
+    "Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});",
+    # Fix hardware concurrency
+    "Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});",
+]
 
 BASE_URL = (
     "https://golfvancouver.cps.golf/onlineresweb/search-teetime"
@@ -154,7 +178,6 @@ def click_calendar_day(page, day_num: int) -> bool:
 
 
 def scrape_tee_times() -> list[dict]:
-    stealth = Stealth()
     all_tee_times = []
 
     with sync_playwright() as p:
@@ -168,7 +191,8 @@ def scrape_tee_times() -> list[dict]:
             ),
         )
         page = context.new_page()
-        stealth.apply_stealth_sync(page)
+        for script in STEALTH_SCRIPTS:
+            context.add_init_script(script)
 
         captured = []
 
