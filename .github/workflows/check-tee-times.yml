@@ -1,0 +1,48 @@
+name: Check Golf Tee Times
+
+on:
+  schedule:
+    # Run every 15 minutes during peak hours (6 AM - 10 PM PT / 14:00 - 06:00 UTC)
+    - cron: "*/15 14-23 * * 0-6"  # UTC 14:00-23:59 = PT 6 AM - 4 PM
+    - cron: "*/15 0-6 * * 0-6"    # UTC 00:00-06:00 = PT 4 PM - 10 PM
+  workflow_dispatch: # Allow manual triggers
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Restore known tee times cache
+        uses: actions/cache@v4
+        with:
+          path: known_tee_times.json
+          key: known-tee-times-${{ github.run_id }}
+          restore-keys: |
+            known-tee-times-
+
+      - name: Run tee time checker
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python scraper.py
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_number }}
+          path: debug/
+          retention-days: 3
