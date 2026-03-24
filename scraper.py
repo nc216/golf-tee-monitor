@@ -51,7 +51,7 @@ BASE_URL = (
 )
 
 KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
-DAYS_AHEAD = 14
+DAYS_AHEAD = 7
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
@@ -75,12 +75,12 @@ def make_key(date: str, time: str, course: str, players: str) -> str:
     return f"{date}|{time}|{course}|{players}"
 
 
-def get_weekend_dates(days_ahead: int = DAYS_AHEAD) -> list[datetime]:
+def get_target_dates(days_ahead: int = DAYS_AHEAD) -> list[datetime]:
     today = datetime.now()
     dates = []
     for i in range(days_ahead):
         d = today + timedelta(days=i)
-        if d.weekday() in (5, 6):
+        if d.weekday() in (6,):  # Sunday only
             dates.append(d)
     return dates
 
@@ -220,7 +220,7 @@ def scrape_tee_times() -> list[dict]:
         dismiss_modals(page)
         print("Page loaded successfully.")
 
-        weekend_dates = get_weekend_dates()
+        weekend_dates = get_target_dates()
         print(f"Checking {len(weekend_dates)} weekend dates...\n")
 
         current_calendar_month = get_calendar_month(page)
