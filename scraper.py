@@ -80,7 +80,7 @@ def get_target_dates(days_ahead: int = DAYS_AHEAD) -> list[datetime]:
     dates = []
     for i in range(days_ahead):
         d = today + timedelta(days=i)
-        if d.weekday() in (6,):  # Sunday only
+        if d.weekday() in (5, 6):  # Saturday and Sunday
             dates.append(d)
     return dates
 
