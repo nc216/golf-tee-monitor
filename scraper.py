@@ -51,7 +51,12 @@ BASE_URL = (
 )
 
 KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
-DAYS_AHEAD = 7
+
+# Only alert for these courses (empty list = all courses)
+COURSES_FILTER = ["Fraserview Golf Course", "Langara Golf Course"]
+
+# Specific dates to monitor (YYYY-MM-DD). Leave empty to use day-of-week logic.
+TARGET_DATES = ["2026-04-16", "2026-04-17"]
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
@@ -75,10 +80,12 @@ def make_key(date: str, time: str, course: str, players: str) -> str:
     return f"{date}|{time}|{course}|{players}"
 
 
-def get_target_dates(days_ahead: int = DAYS_AHEAD) -> list[datetime]:
+def get_target_dates() -> list[datetime]:
+    if TARGET_DATES:
+        return [datetime.strptime(d, "%Y-%m-%d") for d in TARGET_DATES]
     today = datetime.now()
     dates = []
-    for i in range(days_ahead):
+    for i in range(14):
         d = today + timedelta(days=i)
         if d.weekday() in (5, 6):  # Saturday and Sunday
             dates.append(d)
@@ -90,6 +97,8 @@ def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
     for item in data.get("content", []):
         start_time = item.get("startTime", "")
         course_name = item.get("courseName", "Unknown")
+        if COURSES_FILTER and course_name not in COURSES_FILTER:
+            continue
         players_display = item.get("playersDisplay", "?")
         holes_display = item.get("holesDisplay", "?")
         price = ""
