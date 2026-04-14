@@ -2,9 +2,9 @@ name: Check Golf Tee Times
 
 on:
   schedule:
-    # Run every 15 minutes during peak hours (6 AM - 10 PM PT / 14:00 - 06:00 UTC)
-    - cron: "*/15 14-23 * * 0-6"  # UTC 14:00-23:59 = PT 6 AM - 4 PM
-    - cron: "*/15 0-6 * * 0-6"    # UTC 00:00-06:00 = PT 4 PM - 10 PM
+    # Run every 5 minutes during peak hours (6 AM - 10 PM PT / 14:00 - 06:00 UTC)
+    - cron: "*/5 14-23 * * 0-6"  # UTC 14:00-23:59 = PT 6 AM - 4 PM
+    - cron: "*/5 0-6 * * 0-6"    # UTC 00:00-06:00 = PT 4 PM - 10 PM
   workflow_dispatch: # Allow manual triggers
 
 jobs:
