@@ -95,6 +95,8 @@ def get_target_dates() -> list[datetime]:
 def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
     results = []
     for item in data.get("content", []):
+        if not isinstance(item, dict):
+            continue
         start_time = item.get("startTime", "")
         course_name = item.get("courseName", "Unknown")
         if COURSES_FILTER and course_name not in COURSES_FILTER:
