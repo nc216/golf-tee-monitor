@@ -53,10 +53,10 @@ BASE_URL = (
 KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
 
 # Only alert for these courses (empty list = all courses)
-COURSES_FILTER = ["Fraserview Golf Course", "Langara Golf Course"]
+COURSES_FILTER = []
 
 # Specific dates to monitor (YYYY-MM-DD). Leave empty to use day-of-week logic.
-TARGET_DATES = ["2026-04-16", "2026-04-17"]
+TARGET_DATES = ["2026-06-27"]
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
