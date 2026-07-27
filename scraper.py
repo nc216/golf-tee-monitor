@@ -51,6 +51,7 @@ BASE_URL = (
 )
 
 KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
+DEBUG_DIR = Path(__file__).parent / "debug"
 
 # Only alert for these courses (empty list = all courses)
 COURSES_FILTER = ["McCleery Golf Course"]
@@ -126,6 +127,34 @@ def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
             "price": price,
         })
     return results
+
+
+def save_debug(page, tag: str) -> None:
+    """Dump a screenshot and HTML snapshot of the current page state for diagnosis."""
+    try:
+        DEBUG_DIR.mkdir(exist_ok=True)
+        page.screenshot(path=str(DEBUG_DIR / f"{tag}.png"), full_page=True)
+        (DEBUG_DIR / f"{tag}.html").write_text(page.content())
+    except Exception as e:
+        print(f"  (failed to save debug snapshot '{tag}': {e})")
+
+
+def diagnose_calendar(page) -> None:
+    """Print candidate calendar-related selectors to help spot markup changes."""
+    candidates = [
+        ".ngx-dates-picker-calendar-container",
+        ".topbar-container",
+        ".day-background-upper",
+        "[class*='calendar']",
+        "[class*='date-picker']",
+        "[class*='datepicker']",
+    ]
+    for sel in candidates:
+        els = page.query_selector_all(sel)
+        print(f"  [diag] {sel!r}: {len(els)} matches")
+        if els:
+            text = els[0].inner_text().strip().replace("\n", "\\n")[:120]
+            print(f"  [diag]   first match class={els[0].get_attribute('class')!r} text={text!r}")
 
 
 def dismiss_modals(page) -> None:
@@ -230,12 +259,15 @@ def scrape_tee_times() -> list[dict]:
         # Dismiss course notes modals
         dismiss_modals(page)
         print("Page loaded successfully.")
+        save_debug(page, "initial")
 
         weekend_dates = get_target_dates()
         print(f"Checking {len(weekend_dates)} weekend dates...\n")
 
         current_calendar_month = get_calendar_month(page)
         print(f"Calendar showing: {current_calendar_month}")
+        if not current_calendar_month:
+            diagnose_calendar(page)
 
         for target_date in weekend_dates:
             target_month_label = target_date.strftime("%B %Y")
@@ -247,6 +279,8 @@ def scrape_tee_times() -> list[dict]:
                 print(f"  Navigating calendar to {target_month_label}...")
                 if not navigate_to_month(page, target_date):
                     print(f"  Failed to navigate to {target_month_label}")
+                    diagnose_calendar(page)
+                    save_debug(page, f"nav_fail_{target_date.strftime('%Y-%m-%d')}")
                     continue
 
             # Click the day
