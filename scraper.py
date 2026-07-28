@@ -251,8 +251,18 @@ def scrape_tee_times() -> list[dict]:
 
         # Check for bot detection
         body_text = page.inner_text("body")
+        page_title = page.title()
         if "Suspicious" in body_text:
             print("ERROR: Bot detection triggered.")
+            save_debug(page, "bot_detection")
+            browser.close()
+            return []
+        if page_title.strip() == "Just a moment..." or "Verify you are human" in body_text:
+            print(
+                "ERROR: Blocked by Cloudflare bot-check (Turnstile challenge). "
+                "The site never reached the real booking page this run."
+            )
+            save_debug(page, "cloudflare_challenge")
             browser.close()
             return []
 
