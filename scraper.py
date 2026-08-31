@@ -54,10 +54,10 @@ KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
 DEBUG_DIR = Path(__file__).parent / "debug"
 
 # Only alert for these courses (empty list = all courses)
-COURSES_FILTER = ["McCleery Golf Course"]
+COURSES_FILTER = ["McCleery Golf Course", "Langara Golf Course"]
 
 # Specific dates to monitor (YYYY-MM-DD). Leave empty to use day-of-week logic.
-TARGET_DATES = ["2026-08-25", "2026-08-26"]
+TARGET_DATES = ["2026-09-01"]
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
