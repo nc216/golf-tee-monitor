@@ -171,23 +171,45 @@ def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
     import time
     start = time.time()
     deadline = start + timeout_ms / 1000
+    attempt = 0
 
     while time.time() < deadline:
+        attempt += 1
         title = page.title().strip()
         body = page.inner_text("body")
 
         if title not in ("Just a moment...", "") and "Verify you are human" not in body:
             if "Suspicious" not in body:
+                print(f"  Turnstile solved (title={title!r})")
                 return True
 
-        turnstile_iframe = page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+        all_iframes = page.query_selector_all("iframe")
+        if attempt <= 3 or attempt % 5 == 0:
+            for i, f in enumerate(all_iframes):
+                src = f.get_attribute("src") or ""
+                print(f"  iframe[{i}] src={src[:120]}")
+
+        turnstile_iframe = page.query_selector(
+            'iframe[src*="challenges.cloudflare.com"]'
+        )
+        if not turnstile_iframe:
+            turnstile_iframe = page.query_selector(
+                'iframe[src*="turnstile"]'
+            )
         if turnstile_iframe:
             box = turnstile_iframe.bounding_box()
             if box:
-                page.mouse.click(box["x"] + 35, box["y"] + 35)
-                print("  Clicked Turnstile checkbox")
+                cx = box["x"] + 35
+                cy = box["y"] + 35
+                print(f"  Clicking Turnstile at ({cx}, {cy}), box={box}")
+                page.mouse.click(cx, cy)
                 page.wait_for_timeout(5000)
                 continue
+            else:
+                print("  Turnstile iframe found but no bounding box")
+        else:
+            if attempt <= 3:
+                print(f"  No Turnstile iframe found ({len(all_iframes)} iframes total)")
 
         page.wait_for_timeout(2000)
 
