@@ -1,16 +1,16 @@
 """
 Golf Vancouver Tee Time Monitor
 
-Uses Playwright with stealth to load the CPS Golf booking page, navigate
-through the calendar to weekend dates, and extract available tee times
-via intercepted API responses. Detects newly appeared times (cancellations)
+Uses Playwright to load the CPS Golf booking page (bypassing Cloudflare
+Turnstile), then calls the TeeTimes API directly from the browser context
+to fetch available tee times. Detects newly appeared times (cancellations)
 and sends an email notification.
 """
 
 import json
 import os
-import re
 import smtplib
+import uuid
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -46,14 +46,12 @@ STEALTH_SCRIPTS = [
     "Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});",
     "Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});",
     "Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});",
-    # Prevent iframe contentWindow detection
     """(() => {
         const origGetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get;
         Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
             get: function() { return origGetter.call(this); }
         });
     })();""",
-    # WebGL vendor/renderer spoofing
     """(() => {
         const getParameter = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(param) {
@@ -93,6 +91,10 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "noahcastelo@gmail.com")
 
+# API constants
+WEBSITE_ID = "2957df8d-a5c0-40e2-6586-08dd13a88838"
+COURSE_IDS = "2,1,3"  # Fraserview=2, Langara=1, McCleery=3
+
 
 def load_known_times() -> set[str]:
     if KNOWN_TIMES_FILE.exists():
@@ -115,14 +117,14 @@ def get_target_dates() -> list[datetime]:
     dates = []
     for i in range(14):
         d = today + timedelta(days=i)
-        if d.weekday() in (5, 6):  # Saturday and Sunday
+        if d.weekday() in (5, 6):
             dates.append(d)
     return dates
 
 
-def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
+def parse_tee_times(content: list, date: datetime) -> list[dict]:
     results = []
-    for item in data.get("content", []):
+    for item in content:
         if not isinstance(item, dict):
             continue
         start_time = item.get("startTime", "")
@@ -134,7 +136,7 @@ def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
         price = ""
         prices = item.get("shItemPrices", [])
         if prices:
-            price = f"CA${prices[0].get('price', '?')}"
+            price = "CA${}".format(prices[0].get("price", "?"))
 
         try:
             dt = datetime.fromisoformat(start_time)
@@ -157,7 +159,6 @@ def parse_tee_times_from_api(data: dict, date: datetime) -> list[dict]:
 
 
 def save_debug(page, tag: str) -> None:
-    """Dump a screenshot and HTML snapshot of the current page state for diagnosis."""
     try:
         DEBUG_DIR.mkdir(exist_ok=True)
         page.screenshot(path=str(DEBUG_DIR / f"{tag}.png"), full_page=True)
@@ -166,89 +167,8 @@ def save_debug(page, tag: str) -> None:
         print(f"  (failed to save debug snapshot '{tag}': {e})")
 
 
-def diagnose_calendar(page) -> None:
-    """Print candidate calendar-related selectors to help spot markup changes."""
-    candidates = [
-        ".ngx-dates-picker-calendar-container",
-        ".topbar-container",
-        ".day-background-upper",
-        "[class*='calendar']",
-        "[class*='date-picker']",
-        "[class*='datepicker']",
-    ]
-    for sel in candidates:
-        els = page.query_selector_all(sel)
-        print(f"  [diag] {sel!r}: {len(els)} matches")
-        if els:
-            text = els[0].inner_text().strip().replace("\n", "\\n")[:120]
-            print(f"  [diag]   first match class={els[0].get_attribute('class')!r} text={text!r}")
-
-
-def dismiss_modals(page) -> None:
-    """Close any popup dialogs (course notes, etc.)."""
-    for _ in range(5):
-        close_btn = page.query_selector('button:has-text("Close")')
-        if close_btn and close_btn.is_visible():
-            close_btn.click()
-            page.wait_for_timeout(500)
-        else:
-            break
-
-
-def get_calendar_month(page) -> str:
-    """Read the currently displayed month name from the calendar header."""
-    header = page.query_selector(".ngx-dates-picker-calendar-container")
-    if header:
-        text = header.inner_text()
-        # First line should be like "March 2026"
-        first_line = text.split("\n")[0].strip()
-        return first_line
-    return ""
-
-
-def navigate_to_month(page, target_date: datetime) -> bool:
-    """Click the forward arrow until the calendar shows the target month."""
-    target_label = target_date.strftime("%B %Y")
-    for _ in range(6):
-        current = get_calendar_month(page)
-        if target_label in current:
-            return True
-        # The forward arrow is the last div in .topbar-container
-        # (structure: [back-arrow div] [title span] [forward-arrow div])
-        next_btn = page.query_selector(
-            ".topbar-container > div:last-child"
-        )
-        if next_btn and next_btn.is_visible():
-            cls = next_btn.get_attribute("class") or ""
-            if "disabled" in cls:
-                print(f"  Forward arrow is disabled")
-                return False
-            next_btn.click()
-            page.wait_for_timeout(500)
-        else:
-            print(f"  Could not find next-month button")
-            return False
-    return False
-
-
-def click_calendar_day(page, day_num: int) -> bool:
-    """Click a specific day number in the visible calendar."""
-    day_spans = page.query_selector_all(".day-background-upper.is-visible")
-    for span in day_spans:
-        if span.inner_text().strip() == str(day_num):
-            cls = span.get_attribute("class") or ""
-            if "is-disabled" in cls:
-                return False
-            span.click()
-            return True
-    return False
-
-
 def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
-    """Wait for Cloudflare Turnstile challenge to resolve.
-    Returns True if the real page loaded, False if still stuck."""
     import time
-
     start = time.time()
     deadline = start + timeout_ms / 1000
 
@@ -256,12 +176,10 @@ def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
         title = page.title().strip()
         body = page.inner_text("body")
 
-        # Check if we've gotten past the challenge
         if title not in ("Just a moment...", "") and "Verify you are human" not in body:
             if "Suspicious" not in body:
                 return True
 
-        # Try clicking the Turnstile checkbox if visible
         turnstile_iframe = page.query_selector('iframe[src*="challenges.cloudflare.com"]')
         if turnstile_iframe:
             box = turnstile_iframe.bounding_box()
@@ -276,9 +194,97 @@ def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
     return False
 
 
-def scrape_tee_times() -> list[dict]:
-    all_tee_times = []
+def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
+    """Call the CPS Golf API directly from the browser context."""
+    txn_id = str(uuid.uuid4())
+    date_strings = [d.strftime("%a %b %d %Y") for d in target_dates]
 
+    js_code = """
+    async ([dateStrings, txnId, websiteId, courseIds]) => {
+        // Get Bearer token
+        const tokenResp = await fetch('/identityapi/myconnect/token/short', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'client_id=onlinereswebshortlived&client_secret=v4secret&grant_type=client_credentials&scope=onlinereservation references'
+        });
+        if (!tokenResp.ok) return { error: 'token_failed', status: tokenResp.status };
+        const { access_token } = await tokenResp.json();
+
+        const headers = {
+            'Authorization': `Bearer ${access_token}`,
+            'Content-Type': 'application/json',
+            'client-id': 'onlineresweb',
+            'x-websiteid': websiteId,
+            'x-componentid': '1',
+            'x-siteid': '6',
+            'x-productid': '1',
+            'x-moduleid': '7',
+            'X-TerminalId': '3',
+            'x-timezone-offset': '420',
+            'x-timezoneid': 'America/Vancouver',
+            'Accept': 'application/json, text/plain, */*',
+        };
+
+        // Register transaction ID
+        await fetch('/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId', {
+            method: 'POST', headers, body: JSON.stringify({ transactionId: txnId })
+        });
+
+        // Fetch tee times for each date
+        const results = {};
+        for (const dateStr of dateStrings) {
+            const params = new URLSearchParams({
+                searchDate: dateStr,
+                holes: '18',
+                numberOfPlayer: '0',
+                courseIds: courseIds,
+                searchTimeType: '0',
+                transactionId: txnId,
+                teeOffTimeMin: '0',
+                teeOffTimeMax: '23',
+                isChangeTeeOffTime: 'true',
+                teeSheetSearchView: '5',
+                classCode: 'R',
+                defaultOnlineRate: 'N',
+                isUseCapacityPricing: 'false',
+                memberStoreId: '1',
+                searchType: '1',
+            });
+            const resp = await fetch(
+                `/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?${params}`,
+                { headers }
+            );
+            if (resp.ok) {
+                const data = await resp.json();
+                results[dateStr] = data.content || [];
+            } else {
+                results[dateStr] = { error: resp.status };
+            }
+        }
+        return results;
+    }
+    """
+
+    result = page.evaluate(js_code, [date_strings, txn_id, WEBSITE_ID, COURSE_IDS])
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"  API error: {result}")
+        return []
+
+    all_tee_times = []
+    for target_date, date_str in zip(target_dates, date_strings):
+        data = result.get(date_str, [])
+        if isinstance(data, dict) and "error" in data:
+            print(f"  {target_date.strftime('%A %b %d')}: API error {data['error']}")
+            continue
+        times = parse_tee_times(data, target_date)
+        print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
+        all_tee_times.extend(times)
+
+    return all_tee_times
+
+
+def scrape_tee_times() -> list[dict]:
     headed = os.environ.get("HEADED", "0") == "1"
 
     with sync_playwright() as p:
@@ -305,22 +311,10 @@ def scrape_tee_times() -> list[dict]:
         for script in STEALTH_SCRIPTS:
             context.add_init_script(script)
 
-        captured = []
-
-        def on_response(response):
-            if "TeeTimes" in response.url and response.status == 200:
-                try:
-                    captured.append(response.json())
-                except Exception:
-                    pass
-
-        page.on("response", on_response)
-
         print(f"Loading {BASE_URL}")
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
 
-        # Check for Cloudflare challenge and try to get past it
         body_text = page.inner_text("body")
         page_title = page.title()
         is_challenge = (
@@ -346,61 +340,13 @@ def scrape_tee_times() -> list[dict]:
             browser.close()
             return []
 
-        # Wait for the Angular SPA to finish loading
-        page.wait_for_load_state("networkidle", timeout=30000)
-        page.wait_for_timeout(3000)
-
-        # Dismiss course notes modals
-        dismiss_modals(page)
-        print("Page loaded successfully.")
+        print("Page loaded, calling API directly...")
         save_debug(page, "initial")
 
-        weekend_dates = get_target_dates()
-        print(f"Checking {len(weekend_dates)} weekend dates...\n")
+        target_dates = get_target_dates()
+        print(f"Checking {len(target_dates)} dates...\n")
 
-        current_calendar_month = get_calendar_month(page)
-        print(f"Calendar showing: {current_calendar_month}")
-        if not current_calendar_month:
-            diagnose_calendar(page)
-
-        for target_date in weekend_dates:
-            target_month_label = target_date.strftime("%B %Y")
-            day_num = target_date.day
-
-            # Navigate to the right month if needed
-            current = get_calendar_month(page)
-            if target_month_label not in current:
-                print(f"  Navigating calendar to {target_month_label}...")
-                if not navigate_to_month(page, target_date):
-                    print(f"  Failed to navigate to {target_month_label}")
-                    diagnose_calendar(page)
-                    save_debug(page, f"nav_fail_{target_date.strftime('%Y-%m-%d')}")
-                    continue
-
-            # Click the day
-            captured.clear()
-            if not click_calendar_day(page, day_num):
-                print(f"  Could not click {target_date.strftime('%b %d')} (disabled or not found)")
-                continue
-
-            # Wait for API response
-            page.wait_for_timeout(4000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-
-            # Dismiss any modals that pop up
-            dismiss_modals(page)
-
-            # Parse the API response
-            if captured:
-                data = captured[-1]
-                times = parse_tee_times_from_api(data, target_date)
-                print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
-                all_tee_times.extend(times)
-            else:
-                print(f"  {target_date.strftime('%A %b %d')}: no API response captured")
+        all_tee_times = fetch_tee_times_via_api(page, target_dates)
 
         browser.close()
 
@@ -418,24 +364,25 @@ def send_email(new_times: list[dict]) -> None:
             )
         return
 
-    subject = f"Golf Tee Time Alert: {len(new_times)} new time(s) available!"
+    subject = "Golf Tee Time Alert: {} new time(s) available!".format(len(new_times))
 
     lines = ["New tee times on Golf Vancouver (likely cancellations):\n"]
 
     by_date = {}
     for tt in new_times:
-        key = f"{tt['day']} {tt['date']}"
+        key = "{} {}".format(tt["day"], tt["date"])
         by_date.setdefault(key, []).append(tt)
 
     for date_label, times in sorted(by_date.items()):
-        lines.append(f"\n--- {date_label} ---")
+        lines.append("\n--- {} ---".format(date_label))
         for tt in sorted(times, key=lambda x: x["time"]):
             lines.append(
-                f"  {tt['time']:>8s}  {tt['course']:<30s}  "
-                f"{tt['holes']}H  {tt['players']}  {tt['price']}"
+                "  {:>8s}  {:<30s}  {}H  {}  {}".format(
+                    tt["time"], tt["course"], tt["holes"], tt["players"], tt["price"]
+                )
             )
 
-    lines.append(f"\nBook now: {BASE_URL}")
+    lines.append("\nBook now: {}".format(BASE_URL))
 
     body = "\n".join(lines)
     msg = MIMEText(body)
@@ -448,14 +395,14 @@ def send_email(new_times: list[dict]) -> None:
         server.login(EMAIL_FROM, EMAIL_PASSWORD)
         server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
 
-    print(f"Email sent to {EMAIL_TO} with {len(new_times)} new tee time(s).")
+    print("Email sent to {} with {} new tee time(s).".format(EMAIL_TO, len(new_times)))
 
 
 def main():
-    print(f"[{datetime.now().isoformat()}] Starting tee time check...")
+    print("[{}] Starting tee time check...".format(datetime.now().isoformat()))
 
     tee_times = scrape_tee_times()
-    print(f"\nFound {len(tee_times)} total weekend tee times.")
+    print("\nFound {} total tee times.".format(len(tee_times)))
 
     if not tee_times:
         print("No tee times found.")
@@ -473,17 +420,16 @@ def main():
 
     if new_keys:
         new_times = [key_to_time[k] for k in sorted(new_keys)]
-        print(f"\n*** {len(new_times)} NEW tee time(s) detected! ***")
+        print("\n*** {} NEW tee time(s) detected! ***".format(len(new_times)))
         send_email(new_times)
     else:
         print("No new tee times since last check.")
 
-    # Save and prune old keys
     all_keys = known_keys | current_keys
     today_str = datetime.now().strftime("%Y-%m-%d")
     pruned = {k for k in all_keys if k.split("|")[0] >= today_str}
     save_known_times(pruned)
-    print(f"Saved {len(pruned)} known tee time keys.")
+    print("Saved {} known tee time keys.".format(len(pruned)))
 
 
 if __name__ == "__main__":
