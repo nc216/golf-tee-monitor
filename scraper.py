@@ -323,6 +323,36 @@ def scrape_tee_times() -> list[dict]:
         for script in STEALTH_SCRIPTS:
             context.add_init_script(script)
 
+        # First, navigate to the API path to trigger Cloudflare challenge
+        # and get cf_clearance cookies for the /onlineres/ path.
+        api_probe_url = (
+            "https://golfvancouver.cps.golf/onlineres/onlineapi/api/v1/"
+            "onlinereservation/OnlineCourses"
+        )
+        print(f"Probing API path for Cloudflare challenge...")
+        page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+
+        body_text = page.inner_text("body")
+        page_title = page.title()
+        is_challenge = (
+            "Just a moment" in page_title
+            or "Verify" in body_text
+            or "Verifying" in page_title
+        )
+
+        if is_challenge:
+            print("Cloudflare challenge on API path, solving...")
+            save_debug(page, "api_challenge_before")
+            if not wait_for_turnstile(page, timeout_ms=40000):
+                print("ERROR: Could not solve Cloudflare challenge on API path.")
+                save_debug(page, "api_challenge_failed")
+                browser.close()
+                return []
+            print("API path challenge passed!")
+            page.wait_for_timeout(3000)
+
+        # Now load the main page (should pass without challenge since we have cookies)
         print(f"Loading {BASE_URL}")
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
@@ -330,19 +360,20 @@ def scrape_tee_times() -> list[dict]:
         body_text = page.inner_text("body")
         page_title = page.title()
         is_challenge = (
-            page_title.strip() == "Just a moment..."
+            "Just a moment" in page_title
             or "Verify you are human" in body_text
+            or "Verifying" in page_title
         )
 
         if is_challenge:
-            print("Cloudflare Turnstile detected, waiting for resolution...")
+            print("Cloudflare Turnstile on main page, solving...")
             save_debug(page, "turnstile_before")
             if not wait_for_turnstile(page, timeout_ms=40000):
                 print("ERROR: Could not get past Cloudflare Turnstile challenge.")
                 save_debug(page, "turnstile_failed")
                 browser.close()
                 return []
-            print("Turnstile challenge passed!")
+            print("Main page challenge passed!")
             page.wait_for_timeout(3000)
 
         body_text = page.inner_text("body")
@@ -352,12 +383,12 @@ def scrape_tee_times() -> list[dict]:
             browser.close()
             return []
 
-        # Wait for the page to finish loading all resources
+        # Wait for the page to finish loading
         try:
             page.wait_for_load_state("networkidle", timeout=30000)
         except Exception:
             pass
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(3000)
 
         print("Page loaded, calling API directly...")
         save_debug(page, "initial")
