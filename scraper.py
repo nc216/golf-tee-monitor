@@ -325,37 +325,47 @@ def scrape_tee_times() -> list[dict]:
 
         # Navigate to the API path first to trigger Cloudflare challenge
         # and get cf_clearance cookies for the /onlineres/ path.
+        # Cloudflare returns the challenge as a 403, which Playwright
+        # won't render. Use route() to force the status to 200.
         api_probe_url = (
             "https://golfvancouver.cps.golf/onlineres/onlineapi/api/v1/"
             "onlinereservation/OnlineCourses"
         )
         print("Probing API path for Cloudflare challenge...")
-        try:
-            page.goto(api_probe_url, wait_until="commit", timeout=60000)
-        except Exception:
-            pass
+
+        def force_200(route):
+            resp = route.fetch()
+            route.fulfill(response=resp, status=200)
+
+        page.route("**/OnlineCourses", force_200)
+        page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
+        page.unroute("**/OnlineCourses")
         page.wait_for_timeout(3000)
 
         body_text = page.inner_text("body")
         page_title = page.title()
+        print(f"  API probe page title: {page_title!r}")
         is_challenge = (
             "Just a moment" in page_title
             or "Verify" in body_text
             or "Verifying" in page_title
+            or "Club Prophet" in page_title
         )
+
+        save_debug(page, "api_probe")
 
         if is_challenge:
             print("Cloudflare challenge on API path, solving...")
-            save_debug(page, "api_challenge_before")
             if not wait_for_turnstile(page, timeout_ms=40000):
                 print("ERROR: Could not solve Cloudflare challenge on API path.")
                 save_debug(page, "api_challenge_failed")
                 browser.close()
                 return []
             print("API path challenge passed!")
+            save_debug(page, "api_challenge_solved")
             page.wait_for_timeout(3000)
         else:
-            print(f"  API probe: no challenge (title={page_title!r})")
+            print("  No challenge detected on API path.")
 
         # Now load the main page (should pass without challenge since we have cookies)
         print(f"Loading {BASE_URL}")
