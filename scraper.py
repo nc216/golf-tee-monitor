@@ -373,9 +373,6 @@ def scrape_tee_times() -> list[dict]:
         page.route("**/onlineapi/**", force_200)
         page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(8000)
-        page.unroute("**/onlineapi/**")
-        page.remove_listener("response", log_response)
-        page.remove_listener("pageerror", log_error)
 
         body_text = page.inner_text("body")
         page_title = page.title()
@@ -398,9 +395,17 @@ def scrape_tee_times() -> list[dict]:
                 return []
             print("API path challenge passed!")
             save_debug(page, "api_challenge_solved")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
         else:
             print("  No challenge detected on API path.")
+
+        cookies = context.cookies()
+        cf_cookies = [c for c in cookies if "cf_" in c["name"] or "clearance" in c["name"]]
+        print(f"  Cookies after challenge: {[c['name'] + '=' + c['value'][:20] + '...' for c in cf_cookies]}")
+
+        page.unroute("**/onlineapi/**")
+        page.remove_listener("response", log_response)
+        page.remove_listener("pageerror", log_error)
 
         # Now load the main page (should pass without challenge since we have cookies)
         print(f"Loading {BASE_URL}")
