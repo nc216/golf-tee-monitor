@@ -215,104 +215,84 @@ def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
     return False
 
 
-def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
-    """Call the CPS Golf API directly from the browser context."""
+def fetch_tee_times_via_api(context, target_dates: list[datetime]) -> list[dict]:
+    """Call the CPS Golf API using context.request (shares browser cookies)."""
+    base = "https://golfvancouver.cps.golf"
     txn_id = str(uuid.uuid4())
-    date_strings = [d.strftime("%a %b %d %Y") for d in target_dates]
 
-    js_code = """
-    async ([dateStrings, txnId, websiteId, courseIds]) => {
-        const log = [];
-
-        // Get Bearer token
-        const tokenResp = await fetch('/identityapi/myconnect/token/short', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'client_id=onlinereswebshortlived&client_secret=v4secret&grant_type=client_credentials&scope=onlinereservation references'
-        });
-        if (!tokenResp.ok) {
-            const body = await tokenResp.text();
-            return { error: 'token_failed', status: tokenResp.status, body: body.substring(0, 200) };
-        }
-        const { access_token } = await tokenResp.json();
-        log.push('token OK');
-
-        const headers = {
-            'Authorization': 'Bearer ' + access_token,
-            'Content-Type': 'application/json',
-            'client-id': 'onlineresweb',
-            'x-websiteid': websiteId,
-            'x-componentid': '1',
-            'x-siteid': '6',
-            'x-productid': '1',
-            'x-moduleid': '7',
-            'X-TerminalId': '3',
-            'x-timezone-offset': '420',
-            'x-timezoneid': 'America/Vancouver',
-            'Accept': 'application/json, text/plain, */*',
-        };
-
-        // Register transaction ID
-        const regResp = await fetch('/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId', {
-            method: 'POST', headers, body: JSON.stringify({ transactionId: txnId })
-        });
-        log.push('register ' + regResp.status);
-
-        // Fetch tee times for each date
-        const results = { _log: log };
-        for (const dateStr of dateStrings) {
-            const params = new URLSearchParams({
-                searchDate: dateStr,
-                holes: '18',
-                numberOfPlayer: '0',
-                courseIds: courseIds,
-                searchTimeType: '0',
-                transactionId: txnId,
-                teeOffTimeMin: '0',
-                teeOffTimeMax: '23',
-                isChangeTeeOffTime: 'true',
-                teeSheetSearchView: '5',
-                classCode: 'R',
-                defaultOnlineRate: 'N',
-                isUseCapacityPricing: 'false',
-                memberStoreId: '1',
-                searchType: '1',
-            });
-            const resp = await fetch(
-                '/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?' + params,
-                { headers }
-            );
-            if (resp.ok) {
-                const data = await resp.json();
-                results[dateStr] = data.content || [];
-            } else {
-                const body = await resp.text();
-                results[dateStr] = { error: resp.status, body: body.substring(0, 300) };
-            }
-        }
-        return results;
+    api_headers = {
+        "Content-Type": "application/json",
+        "client-id": "onlineresweb",
+        "x-websiteid": WEBSITE_ID,
+        "x-componentid": "1",
+        "x-siteid": "6",
+        "x-productid": "1",
+        "x-moduleid": "7",
+        "X-TerminalId": "3",
+        "x-timezone-offset": "420",
+        "x-timezoneid": "America/Vancouver",
+        "Accept": "application/json, text/plain, */*",
     }
-    """
 
-    result = page.evaluate(js_code, [date_strings, txn_id, WEBSITE_ID, COURSE_IDS])
-
-    if isinstance(result, dict) and "error" in result and "_log" not in result:
-        print(f"  API error: {result}")
+    token_resp = context.request.post(
+        f"{base}/identityapi/myconnect/token/short",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=(
+            "client_id=onlinereswebshortlived&client_secret=v4secret"
+            "&grant_type=client_credentials"
+            "&scope=onlinereservation references"
+        ),
+    )
+    if not token_resp.ok:
+        print(f"  Token request failed: {token_resp.status}")
         return []
+    token = token_resp.json()["access_token"]
+    print("  Token OK")
+    api_headers["Authorization"] = f"Bearer {token}"
 
-    log = result.pop("_log", [])
-    if log:
-        print(f"  API log: {', '.join(log)}")
+    reg_resp = context.request.post(
+        f"{base}/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId",
+        headers=api_headers,
+        data=json.dumps({"transactionId": txn_id}),
+    )
+    print(f"  Register: {reg_resp.status}")
+    if not reg_resp.ok:
+        body = reg_resp.text()[:300]
+        print(f"  Register failed: {body}")
 
     all_tee_times = []
-    for target_date, date_str in zip(target_dates, date_strings):
-        data = result.get(date_str, [])
-        if isinstance(data, dict) and "error" in data:
-            print(f"  {target_date.strftime('%A %b %d')}: API error {data['error']} - {data.get('body', '')}")
-            continue
-        times = parse_tee_times(data, target_date)
-        print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
-        all_tee_times.extend(times)
+    for target_date in target_dates:
+        date_str = target_date.strftime("%a %b %d %Y")
+        params = {
+            "searchDate": date_str,
+            "holes": "18",
+            "numberOfPlayer": "0",
+            "courseIds": COURSE_IDS,
+            "searchTimeType": "0",
+            "transactionId": txn_id,
+            "teeOffTimeMin": "0",
+            "teeOffTimeMax": "23",
+            "isChangeTeeOffTime": "true",
+            "teeSheetSearchView": "5",
+            "classCode": "R",
+            "defaultOnlineRate": "N",
+            "isUseCapacityPricing": "false",
+            "memberStoreId": "1",
+            "searchType": "1",
+        }
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        resp = context.request.get(
+            f"{base}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?{qs}",
+            headers=api_headers,
+        )
+        if resp.ok:
+            data = resp.json()
+            times = parse_tee_times(data.get("content", []), target_date)
+            print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
+            all_tee_times.extend(times)
+        else:
+            body = resp.text()[:300]
+            print(f"  {target_date.strftime('%A %b %d')}: API error {resp.status} - {body}")
 
     return all_tee_times
 
@@ -451,7 +431,7 @@ def scrape_tee_times() -> list[dict]:
         target_dates = get_target_dates()
         print(f"Checking {len(target_dates)} dates...\n")
 
-        all_tee_times = fetch_tee_times_via_api(page, target_dates)
+        all_tee_times = fetch_tee_times_via_api(context, target_dates)
 
         browser.close()
 
