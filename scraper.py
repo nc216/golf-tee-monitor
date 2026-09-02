@@ -16,33 +16,60 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
 STEALTH_SCRIPTS = [
-    # Hide webdriver flag
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
-    # Fix chrome runtime
-    """window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };""",
-    # Fix plugins/mimeTypes
+    """window.chrome = {
+        runtime: { onConnect: undefined, onMessage: undefined },
+        loadTimes: function(){}, csi: function(){},
+        app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+    };""",
     """Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5].map(() => ({
-            length: 1,
-            0: {type: 'application/pdf'},
-            description: 'Portable Document Format',
-            filename: 'internal-pdf-viewer',
-            name: 'Chrome PDF Plugin',
-        })),
+        get: () => {
+            const plugins = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            plugins.forEach(p => { p.length = 1; p[0] = {type: 'application/pdf'}; });
+            Object.defineProperty(plugins, 'length', {value: 3});
+            return plugins;
+        },
     });""",
-    # Fix permissions query
     """const originalQuery = window.navigator.permissions.query;
     window.navigator.permissions.query = (parameters) =>
         parameters.name === 'notifications'
             ? Promise.resolve({ state: Notification.permission })
             : originalQuery(parameters);""",
-    # Fix languages
     "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});",
-    # Fix platform
-    "Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});",
-    # Fix hardware concurrency
-    "Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});",
+    "Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});",
+    "Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});",
+    "Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});",
+    "Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});",
+    # Prevent iframe contentWindow detection
+    """(() => {
+        const origGetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get;
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+            get: function() { return origGetter.call(this); }
+        });
+    })();""",
+    # WebGL vendor/renderer spoofing
+    """(() => {
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Google Inc. (Intel)';
+            if (param === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.6)';
+            return getParameter.call(this, param);
+        };
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+            const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+            WebGL2RenderingContext.prototype.getParameter = function(param) {
+                if (param === 37445) return 'Google Inc. (Intel)';
+                if (param === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.6)';
+                return getParameter2.call(this, param);
+            };
+        }
+    })();""",
 ]
 
 BASE_URL = (
@@ -217,18 +244,62 @@ def click_calendar_day(page, day_num: int) -> bool:
     return False
 
 
+def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
+    """Wait for Cloudflare Turnstile challenge to resolve.
+    Returns True if the real page loaded, False if still stuck."""
+    import time
+
+    start = time.time()
+    deadline = start + timeout_ms / 1000
+
+    while time.time() < deadline:
+        title = page.title().strip()
+        body = page.inner_text("body")
+
+        # Check if we've gotten past the challenge
+        if title not in ("Just a moment...", "") and "Verify you are human" not in body:
+            if "Suspicious" not in body:
+                return True
+
+        # Try clicking the Turnstile checkbox if visible
+        turnstile_iframe = page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+        if turnstile_iframe:
+            box = turnstile_iframe.bounding_box()
+            if box:
+                page.mouse.click(box["x"] + 35, box["y"] + 35)
+                print("  Clicked Turnstile checkbox")
+                page.wait_for_timeout(5000)
+                continue
+
+        page.wait_for_timeout(2000)
+
+    return False
+
+
 def scrape_tee_times() -> list[dict]:
     all_tee_times = []
 
+    headed = os.environ.get("HEADED", "0") == "1"
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=not headed,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-component-update",
+            ],
+        )
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "Mozilla/5.0 (X11; Linux x86_64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
+            locale="en-US",
+            timezone_id="America/Vancouver",
         )
         page = context.new_page()
         for script in STEALTH_SCRIPTS:
@@ -246,25 +317,38 @@ def scrape_tee_times() -> list[dict]:
         page.on("response", on_response)
 
         print(f"Loading {BASE_URL}")
-        page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(5000)
+        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
 
-        # Check for bot detection
+        # Check for Cloudflare challenge and try to get past it
         body_text = page.inner_text("body")
         page_title = page.title()
+        is_challenge = (
+            page_title.strip() == "Just a moment..."
+            or "Verify you are human" in body_text
+        )
+
+        if is_challenge:
+            print("Cloudflare Turnstile detected, waiting for resolution...")
+            save_debug(page, "turnstile_before")
+            if not wait_for_turnstile(page, timeout_ms=40000):
+                print("ERROR: Could not get past Cloudflare Turnstile challenge.")
+                save_debug(page, "turnstile_failed")
+                browser.close()
+                return []
+            print("Turnstile challenge passed!")
+            page.wait_for_timeout(3000)
+
+        body_text = page.inner_text("body")
         if "Suspicious" in body_text:
-            print("ERROR: Bot detection triggered.")
+            print("ERROR: CPS Golf bot detection triggered.")
             save_debug(page, "bot_detection")
             browser.close()
             return []
-        if page_title.strip() == "Just a moment..." or "Verify you are human" in body_text:
-            print(
-                "ERROR: Blocked by Cloudflare bot-check (Turnstile challenge). "
-                "The site never reached the real booking page this run."
-            )
-            save_debug(page, "cloudflare_challenge")
-            browser.close()
-            return []
+
+        # Wait for the Angular SPA to finish loading
+        page.wait_for_load_state("networkidle", timeout=30000)
+        page.wait_for_timeout(3000)
 
         # Dismiss course notes modals
         dismiss_modals(page)

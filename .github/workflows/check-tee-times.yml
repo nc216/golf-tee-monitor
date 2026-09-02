@@ -23,6 +23,7 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium --with-deps
+          sudo apt-get install -y xvfb
 
       - name: Restore known tee times cache
         uses: actions/cache@v4
@@ -37,7 +38,8 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python scraper.py
+          HEADED: "1"
+        run: xvfb-run --auto-servernum python scraper.py
 
       - name: Upload debug artifacts
         if: always()
