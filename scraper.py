@@ -57,7 +57,7 @@ DEBUG_DIR = Path(__file__).parent / "debug"
 COURSES_FILTER = []
 
 # Specific dates to monitor (YYYY-MM-DD). Leave empty to use day-of-week logic.
-TARGET_DATES = ["2026-09-08"]
+TARGET_DATES = ["2026-09-07"]
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
