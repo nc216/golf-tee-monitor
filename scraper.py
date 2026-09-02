@@ -183,33 +183,32 @@ def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
                 print(f"  Turnstile solved (title={title!r})")
                 return True
 
-        all_iframes = page.query_selector_all("iframe")
-        if attempt <= 3 or attempt % 5 == 0:
-            for i, f in enumerate(all_iframes):
-                src = f.get_attribute("src") or ""
-                print(f"  iframe[{i}] src={src[:120]}")
-
         turnstile_iframe = page.query_selector(
             'iframe[src*="challenges.cloudflare.com"]'
         )
-        if not turnstile_iframe:
-            turnstile_iframe = page.query_selector(
-                'iframe[src*="turnstile"]'
-            )
         if turnstile_iframe:
             box = turnstile_iframe.bounding_box()
             if box:
                 cx = box["x"] + 35
                 cy = box["y"] + 35
-                print(f"  Clicking Turnstile at ({cx}, {cy}), box={box}")
+                print(f"  Clicking Turnstile iframe at ({cx}, {cy})")
                 page.mouse.click(cx, cy)
                 page.wait_for_timeout(5000)
                 continue
-            else:
-                print("  Turnstile iframe found but no bounding box")
-        else:
-            if attempt <= 3:
-                print(f"  No Turnstile iframe found ({len(all_iframes)} iframes total)")
+
+        widget = page.query_selector('.challenge-slot div[style*="grid"]')
+        if widget:
+            box = widget.bounding_box()
+            if box and box["width"] > 0 and box["height"] > 0:
+                cx = box["x"] + 35
+                cy = box["y"] + box["height"] / 2
+                print(f"  Clicking Turnstile widget at ({cx}, {cy}), box={box}")
+                page.mouse.click(cx, cy)
+                page.wait_for_timeout(5000)
+                continue
+
+        if attempt <= 3:
+            print(f"  No Turnstile widget found yet (attempt {attempt})")
 
         page.wait_for_timeout(2000)
 
