@@ -201,17 +201,23 @@ def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
 
     js_code = """
     async ([dateStrings, txnId, websiteId, courseIds]) => {
+        const log = [];
+
         // Get Bearer token
         const tokenResp = await fetch('/identityapi/myconnect/token/short', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: 'client_id=onlinereswebshortlived&client_secret=v4secret&grant_type=client_credentials&scope=onlinereservation references'
         });
-        if (!tokenResp.ok) return { error: 'token_failed', status: tokenResp.status };
+        if (!tokenResp.ok) {
+            const body = await tokenResp.text();
+            return { error: 'token_failed', status: tokenResp.status, body: body.substring(0, 200) };
+        }
         const { access_token } = await tokenResp.json();
+        log.push('token OK');
 
         const headers = {
-            'Authorization': `Bearer ${access_token}`,
+            'Authorization': 'Bearer ' + access_token,
             'Content-Type': 'application/json',
             'client-id': 'onlineresweb',
             'x-websiteid': websiteId,
@@ -226,12 +232,13 @@ def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
         };
 
         // Register transaction ID
-        await fetch('/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId', {
+        const regResp = await fetch('/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId', {
             method: 'POST', headers, body: JSON.stringify({ transactionId: txnId })
         });
+        log.push('register ' + regResp.status);
 
         // Fetch tee times for each date
-        const results = {};
+        const results = { _log: log };
         for (const dateStr of dateStrings) {
             const params = new URLSearchParams({
                 searchDate: dateStr,
@@ -251,14 +258,15 @@ def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
                 searchType: '1',
             });
             const resp = await fetch(
-                `/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?${params}`,
+                '/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?' + params,
                 { headers }
             );
             if (resp.ok) {
                 const data = await resp.json();
                 results[dateStr] = data.content || [];
             } else {
-                results[dateStr] = { error: resp.status };
+                const body = await resp.text();
+                results[dateStr] = { error: resp.status, body: body.substring(0, 300) };
             }
         }
         return results;
@@ -267,15 +275,19 @@ def fetch_tee_times_via_api(page, target_dates: list[datetime]) -> list[dict]:
 
     result = page.evaluate(js_code, [date_strings, txn_id, WEBSITE_ID, COURSE_IDS])
 
-    if isinstance(result, dict) and "error" in result:
+    if isinstance(result, dict) and "error" in result and "_log" not in result:
         print(f"  API error: {result}")
         return []
+
+    log = result.pop("_log", [])
+    if log:
+        print(f"  API log: {', '.join(log)}")
 
     all_tee_times = []
     for target_date, date_str in zip(target_dates, date_strings):
         data = result.get(date_str, [])
         if isinstance(data, dict) and "error" in data:
-            print(f"  {target_date.strftime('%A %b %d')}: API error {data['error']}")
+            print(f"  {target_date.strftime('%A %b %d')}: API error {data['error']} - {data.get('body', '')}")
             continue
         times = parse_tee_times(data, target_date)
         print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
@@ -339,6 +351,13 @@ def scrape_tee_times() -> list[dict]:
             save_debug(page, "bot_detection")
             browser.close()
             return []
+
+        # Wait for the page to finish loading all resources
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_timeout(5000)
 
         print("Page loaded, calling API directly...")
         save_debug(page, "initial")
