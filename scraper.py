@@ -355,14 +355,28 @@ def scrape_tee_times() -> list[dict]:
         )
         print("Probing API path for Cloudflare challenge...")
 
+        def log_response(response):
+            url = response.url
+            if "cdn-cgi" in url or "challenges.cloudflare" in url:
+                print(f"  Sub-resource: {response.status} {url[:120]}")
+
+        def log_error(error):
+            print(f"  JS error: {error.message[:200]}")
+
+        page.on("response", log_response)
+        page.on("pageerror", log_error)
+
         def force_200(route):
             resp = route.fetch()
+            print(f"  route.fetch() status={resp.status}, body_len={len(resp.body())}")
             route.fulfill(response=resp, status=200)
 
-        page.route("**/OnlineCourses", force_200)
+        page.route("**/onlineapi/**", force_200)
         page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
-        page.unroute("**/OnlineCourses")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(8000)
+        page.unroute("**/onlineapi/**")
+        page.remove_listener("response", log_response)
+        page.remove_listener("pageerror", log_error)
 
         body_text = page.inner_text("body")
         page_title = page.title()
