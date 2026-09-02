@@ -323,14 +323,17 @@ def scrape_tee_times() -> list[dict]:
         for script in STEALTH_SCRIPTS:
             context.add_init_script(script)
 
-        # First, navigate to the API path to trigger Cloudflare challenge
+        # Navigate to the API path first to trigger Cloudflare challenge
         # and get cf_clearance cookies for the /onlineres/ path.
         api_probe_url = (
             "https://golfvancouver.cps.golf/onlineres/onlineapi/api/v1/"
             "onlinereservation/OnlineCourses"
         )
-        print(f"Probing API path for Cloudflare challenge...")
-        page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
+        print("Probing API path for Cloudflare challenge...")
+        try:
+            page.goto(api_probe_url, wait_until="commit", timeout=60000)
+        except Exception:
+            pass
         page.wait_for_timeout(3000)
 
         body_text = page.inner_text("body")
@@ -351,6 +354,8 @@ def scrape_tee_times() -> list[dict]:
                 return []
             print("API path challenge passed!")
             page.wait_for_timeout(3000)
+        else:
+            print(f"  API probe: no challenge (title={page_title!r})")
 
         # Now load the main page (should pass without challenge since we have cookies)
         print(f"Loading {BASE_URL}")
