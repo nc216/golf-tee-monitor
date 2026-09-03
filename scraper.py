@@ -1,11 +1,12 @@
 """
 Golf Vancouver Tee Time Monitor
 
-Uses Playwright to load the CPS Golf booking page (bypassing Cloudflare
-Turnstile), then calls the TeeTimes API directly from the browser context
-to fetch available tee times. Detects newly appeared times (cancellations)
-and sends an email notification.
+Uses curl_cffi (browser TLS fingerprint impersonation) to call the
+CPS Golf TeeTimes API directly. Detects newly appeared times
+(cancellations) and sends email notifications.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -15,68 +16,15 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
-STEALTH_SCRIPTS = [
-    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
-    """window.chrome = {
-        runtime: { onConnect: undefined, onMessage: undefined },
-        loadTimes: function(){}, csi: function(){},
-        app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
-    };""",
-    """Object.defineProperty(navigator, 'plugins', {
-        get: () => {
-            const plugins = [
-                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
-            ];
-            plugins.forEach(p => { p.length = 1; p[0] = {type: 'application/pdf'}; });
-            Object.defineProperty(plugins, 'length', {value: 3});
-            return plugins;
-        },
-    });""",
-    """const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) =>
-        parameters.name === 'notifications'
-            ? Promise.resolve({ state: Notification.permission })
-            : originalQuery(parameters);""",
-    "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});",
-    "Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});",
-    "Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});",
-    "Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});",
-    "Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});",
-    """(() => {
-        const origGetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get;
-        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
-            get: function() { return origGetter.call(this); }
-        });
-    })();""",
-    """(() => {
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(param) {
-            if (param === 37445) return 'Google Inc. (Intel)';
-            if (param === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.6)';
-            return getParameter.call(this, param);
-        };
-        if (typeof WebGL2RenderingContext !== 'undefined') {
-            const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-            WebGL2RenderingContext.prototype.getParameter = function(param) {
-                if (param === 37445) return 'Google Inc. (Intel)';
-                if (param === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.6)';
-                return getParameter2.call(this, param);
-            };
-        }
-    })();""",
-]
+from curl_cffi import requests
 
 BASE_URL = (
     "https://golfvancouver.cps.golf/onlineresweb/search-teetime"
     "?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225"
 )
+API_BASE = "https://golfvancouver.cps.golf"
 
 KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
-DEBUG_DIR = Path(__file__).parent / "debug"
 
 # Only alert for these courses (empty list = all courses)
 COURSES_FILTER = []
@@ -158,69 +106,28 @@ def parse_tee_times(content: list, date: datetime) -> list[dict]:
     return results
 
 
-def save_debug(page, tag: str) -> None:
-    try:
-        DEBUG_DIR.mkdir(exist_ok=True)
-        page.screenshot(path=str(DEBUG_DIR / f"{tag}.png"), full_page=True)
-        (DEBUG_DIR / f"{tag}.html").write_text(page.content())
-    except Exception as e:
-        print(f"  (failed to save debug snapshot '{tag}': {e})")
+def fetch_tee_times(target_dates: list[datetime]) -> list[dict]:
+    session = requests.Session(impersonate="chrome")
 
+    # Step 1: Get API token
+    token_resp = session.post(
+        f"{API_BASE}/identityapi/myconnect/token/short",
+        data=(
+            "client_id=onlinereswebshortlived"
+            "&client_secret=v4secret"
+            "&grant_type=client_credentials"
+            "&scope=onlinereservation references"
+        ),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if token_resp.status_code != 200:
+        print(f"ERROR: Token request failed ({token_resp.status_code})")
+        return []
+    token = token_resp.json()["access_token"]
+    print("  Token acquired")
 
-def wait_for_turnstile(page, timeout_ms: int = 30000) -> bool:
-    import time
-    start = time.time()
-    deadline = start + timeout_ms / 1000
-    attempt = 0
-
-    while time.time() < deadline:
-        attempt += 1
-        title = page.title().strip()
-        body = page.inner_text("body")
-
-        if title not in ("Just a moment...", "") and "Verify you are human" not in body:
-            if "Suspicious" not in body:
-                print(f"  Turnstile solved (title={title!r})")
-                return True
-
-        turnstile_iframe = page.query_selector(
-            'iframe[src*="challenges.cloudflare.com"]'
-        )
-        if turnstile_iframe:
-            box = turnstile_iframe.bounding_box()
-            if box:
-                cx = box["x"] + 35
-                cy = box["y"] + 35
-                print(f"  Clicking Turnstile iframe at ({cx}, {cy})")
-                page.mouse.click(cx, cy)
-                page.wait_for_timeout(5000)
-                continue
-
-        widget = page.query_selector('.challenge-slot div[style*="grid"]')
-        if widget:
-            box = widget.bounding_box()
-            if box and box["width"] > 0 and box["height"] > 0:
-                cx = box["x"] + 35
-                cy = box["y"] + box["height"] / 2
-                print(f"  Clicking Turnstile widget at ({cx}, {cy}), box={box}")
-                page.mouse.click(cx, cy)
-                page.wait_for_timeout(5000)
-                continue
-
-        if attempt <= 3:
-            print(f"  No Turnstile widget found yet (attempt {attempt})")
-
-        page.wait_for_timeout(2000)
-
-    return False
-
-
-def fetch_tee_times_via_api(context, target_dates: list[datetime]) -> list[dict]:
-    """Call the CPS Golf API using context.request (shares browser cookies)."""
-    base = "https://golfvancouver.cps.golf"
-    txn_id = str(uuid.uuid4())
-
-    api_headers = {
+    headers = {
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "client-id": "onlineresweb",
         "x-websiteid": WEBSITE_ID,
@@ -232,34 +139,27 @@ def fetch_tee_times_via_api(context, target_dates: list[datetime]) -> list[dict]
         "x-timezone-offset": "420",
         "x-timezoneid": "America/Vancouver",
         "Accept": "application/json, text/plain, */*",
+        "Referer": "https://golfvancouver.cps.golf/onlineresweb/search-teetime",
+        "Origin": "https://golfvancouver.cps.golf",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     }
 
-    token_resp = context.request.post(
-        f"{base}/identityapi/myconnect/token/short",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data=(
-            "client_id=onlinereswebshortlived&client_secret=v4secret"
-            "&grant_type=client_credentials"
-            "&scope=onlinereservation references"
-        ),
-    )
-    if not token_resp.ok:
-        print(f"  Token request failed: {token_resp.status}")
-        return []
-    token = token_resp.json()["access_token"]
-    print("  Token OK")
-    api_headers["Authorization"] = f"Bearer {token}"
-
-    reg_resp = context.request.post(
-        f"{base}/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId",
-        headers=api_headers,
+    # Step 2: Register transaction ID
+    txn_id = str(uuid.uuid4())
+    reg_resp = session.post(
+        f"{API_BASE}/onlineres/onlineapi/api/v1/onlinereservation/RegisterTransactionId",
         data=json.dumps({"transactionId": txn_id}),
+        headers=headers,
     )
-    print(f"  Register: {reg_resp.status}")
-    if not reg_resp.ok:
-        body = reg_resp.text()[:300]
-        print(f"  Register failed: {body}")
+    if reg_resp.status_code != 200:
+        print(f"ERROR: RegisterTransactionId failed ({reg_resp.status_code})")
+        print(f"  Body: {reg_resp.text[:200]}")
+        return []
+    print("  Transaction registered")
 
+    # Step 3: Fetch tee times for each date
     all_tee_times = []
     for target_date in target_dates:
         date_str = target_date.strftime("%a %b %d %Y")
@@ -280,160 +180,23 @@ def fetch_tee_times_via_api(context, target_dates: list[datetime]) -> list[dict]
             "memberStoreId": "1",
             "searchType": "1",
         }
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        resp = context.request.get(
-            f"{base}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes?{qs}",
-            headers=api_headers,
+        tt_resp = session.get(
+            f"{API_BASE}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes",
+            params=params,
+            headers=headers,
         )
-        if resp.ok:
-            data = resp.json()
-            times = parse_tee_times(data.get("content", []), target_date)
-            print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
-            all_tee_times.extend(times)
-        else:
-            body = resp.text()[:300]
-            print(f"  {target_date.strftime('%A %b %d')}: API error {resp.status} - {body}")
+        if tt_resp.status_code != 200:
+            print(
+                f"  {target_date.strftime('%A %b %d')}: "
+                f"API error {tt_resp.status_code} - {tt_resp.text[:200]}"
+            )
+            continue
 
-    return all_tee_times
-
-
-def scrape_tee_times() -> list[dict]:
-    headed = os.environ.get("HEADED", "0") == "1"
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=not headed,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-component-update",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="America/Vancouver",
-        )
-        page = context.new_page()
-        for script in STEALTH_SCRIPTS:
-            context.add_init_script(script)
-
-        # Navigate to the API path first to trigger Cloudflare challenge
-        # and get cf_clearance cookies for the /onlineres/ path.
-        # Cloudflare returns the challenge as a 403, which Playwright
-        # won't render. Use route() to force the status to 200.
-        api_probe_url = (
-            "https://golfvancouver.cps.golf/onlineres/onlineapi/api/v1/"
-            "onlinereservation/OnlineCourses"
-        )
-        print("Probing API path for Cloudflare challenge...")
-
-        def log_response(response):
-            url = response.url
-            if "cdn-cgi" in url or "challenges.cloudflare" in url:
-                print(f"  Sub-resource: {response.status} {url[:120]}")
-
-        def log_error(error):
-            print(f"  JS error: {error.message[:200]}")
-
-        page.on("response", log_response)
-        page.on("pageerror", log_error)
-
-        def force_200(route):
-            resp = route.fetch()
-            print(f"  route.fetch() status={resp.status}, body_len={len(resp.body())}")
-            route.fulfill(response=resp, status=200)
-
-        page.route("**/onlineapi/**", force_200)
-        page.goto(api_probe_url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)
-
-        body_text = page.inner_text("body")
-        page_title = page.title()
-        print(f"  API probe page title: {page_title!r}")
-        is_challenge = (
-            "Just a moment" in page_title
-            or "Verify" in body_text
-            or "Verifying" in page_title
-            or "Club Prophet" in page_title
-        )
-
-        save_debug(page, "api_probe")
-
-        if is_challenge:
-            print("Cloudflare challenge on API path, solving...")
-            if not wait_for_turnstile(page, timeout_ms=40000):
-                print("ERROR: Could not solve Cloudflare challenge on API path.")
-                save_debug(page, "api_challenge_failed")
-                browser.close()
-                return []
-            print("API path challenge passed!")
-            save_debug(page, "api_challenge_solved")
-            page.wait_for_timeout(5000)
-        else:
-            print("  No challenge detected on API path.")
-
-        cookies = context.cookies()
-        cf_cookies = [c for c in cookies if "cf_" in c["name"] or "clearance" in c["name"]]
-        print(f"  Cookies after challenge: {[c['name'] + '=' + c['value'][:20] + '...' for c in cf_cookies]}")
-
-        page.unroute("**/onlineapi/**")
-        page.remove_listener("response", log_response)
-        page.remove_listener("pageerror", log_error)
-
-        # Now load the main page (should pass without challenge since we have cookies)
-        print(f"Loading {BASE_URL}")
-        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3000)
-
-        body_text = page.inner_text("body")
-        page_title = page.title()
-        is_challenge = (
-            "Just a moment" in page_title
-            or "Verify you are human" in body_text
-            or "Verifying" in page_title
-        )
-
-        if is_challenge:
-            print("Cloudflare Turnstile on main page, solving...")
-            save_debug(page, "turnstile_before")
-            if not wait_for_turnstile(page, timeout_ms=40000):
-                print("ERROR: Could not get past Cloudflare Turnstile challenge.")
-                save_debug(page, "turnstile_failed")
-                browser.close()
-                return []
-            print("Main page challenge passed!")
-            page.wait_for_timeout(3000)
-
-        body_text = page.inner_text("body")
-        if "Suspicious" in body_text:
-            print("ERROR: CPS Golf bot detection triggered.")
-            save_debug(page, "bot_detection")
-            browser.close()
-            return []
-
-        # Wait for the page to finish loading
-        try:
-            page.wait_for_load_state("networkidle", timeout=30000)
-        except Exception:
-            pass
-        page.wait_for_timeout(3000)
-
-        print("Page loaded, calling API directly...")
-        save_debug(page, "initial")
-
-        target_dates = get_target_dates()
-        print(f"Checking {len(target_dates)} dates...\n")
-
-        all_tee_times = fetch_tee_times_via_api(context, target_dates)
-
-        browser.close()
+        data = tt_resp.json()
+        content = data.get("content", [])
+        times = parse_tee_times(content, target_date)
+        print(f"  {target_date.strftime('%A %b %d')}: {len(times)} tee times")
+        all_tee_times.extend(times)
 
     return all_tee_times
 
@@ -486,7 +249,10 @@ def send_email(new_times: list[dict]) -> None:
 def main():
     print("[{}] Starting tee time check...".format(datetime.now().isoformat()))
 
-    tee_times = scrape_tee_times()
+    target_dates = get_target_dates()
+    print("Checking {} dates...\n".format(len(target_dates)))
+
+    tee_times = fetch_tee_times(target_dates)
     print("\nFound {} total tee times.".format(len(tee_times)))
 
     if not tee_times:
