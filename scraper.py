@@ -30,7 +30,7 @@ KNOWN_TIMES_FILE = Path(__file__).parent / "known_tee_times.json"
 COURSES_FILTER = []
 
 # Specific dates to monitor (YYYY-MM-DD). Leave empty to use day-of-week logic.
-TARGET_DATES = ["2026-09-07"]
+TARGET_DATES = ["2026-09-13", "2026-09-14"]
 
 # Email settings
 SMTP_SERVER = "smtp.gmail.com"
